@@ -60,7 +60,16 @@ Sea $w = (w_1, w_2, \dots, w_n)^\top$ el vector de ponderaciones o pesos de los 
 
 Para comparar retornos y volatilidad con tasas libres de riesgo anuales ($r_f$), se anualizan los parámetros utilizando el factor $k$ (días hábiles u operativos):
 - Activos bursátiles tradicionales (Acciones, CEDEARs, Bonos): $k = 252$.
-- Criptoactivos (operan 24/7): $k = 365$.
+- Carteras compuestas únicamente por criptoactivos (operan 24/7): $k = 365$.
+- Carteras mixtas: $k = 252$ para **todas** las columnas de la matriz, luego de alinear precios a sesiones comunes. El retorno cripto entre viernes y lunes incluye el fin de semana. No se multiplican columnas de una misma covarianza por calendarios diferentes.
+
+### Moneda de análisis y comparación
+
+Todos los retornos, pesos, métricas y totales se expresan en USD. Los precios históricos en ARS se dividen por la cotización MEP de venta de **esa fecha**, publicada por ArgentinaDatos. Se conservan fechas con precios y FX disponibles para todos los activos; no se rellenan huecos con datos futuros ni con el dólar actual. La respuesta informa el período efectivo y el número de observaciones.
+
+El costo de compra en ARS se convierte con el MEP de compra guardado (ingresado por el usuario o estimado con la última observación histórica anterior a la compra, como máximo 10 días antes). La valuación actual usa la cotización MEP de venta de DolarAPI. Las posiciones duplicadas de un ticker se agregan por valor de mercado para obtener los pesos de la cartera actual. Los bonos soberanos se cargan por valor nominal y precio por 100 VN.
+
+La comparación mide la cartera actual y las óptimas sobre la misma ventana, moneda, tasa libre de riesgo y matriz de covarianza. Usa pesos actuales, sin reconstruir un backtest de transacciones. El retorno ponderado de retornos logarítmicos es la aproximación media-varianza usada por este modelo; no equivale exactamente al retorno realizado de una cartera rebalanceada.
 
 $$
 \mu_{anual} = k \cdot \mu_{diario}

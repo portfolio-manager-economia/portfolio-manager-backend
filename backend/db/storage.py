@@ -1,91 +1,41 @@
-"""Capa de persistencia de datos (SQLite local / Supabase)."""
-
-from datetime import date
-from typing import Dict, List, Optional
-import os
-import sqlite3
-import uuid
-
-DB_PATH = os.path.join(os.path.dirname(__file__), "portfolio.db")
+"""Supabase PostgREST access using the user's JWT, so RLS stays active."""
+from typing import Any
+from fastapi import HTTPException
+import httpx
+from ..auth import User
+from ..config import supabase_config
 
 
-def init_db():
-    """Inicializa la base de datos SQLite para persistencia local de posiciones."""
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS positions (
-                id TEXT PRIMARY KEY,
-                user_id TEXT DEFAULT 'default_user',
-                ticker TEXT NOT NULL,
-                asset_type TEXT NOT NULL,
-                quantity REAL NOT NULL,
-                buy_price REAL NOT NULL,
-                buy_date TEXT NOT NULL
-            )
-        """)
-        conn.commit()
+def _request(user: User, method: str, **kwargs: Any) -> list[dict]:
+    try:
+        url, key = supabase_config()
+        response = httpx.request(method, f"{url}/rest/v1/positions", headers={
+            "apikey": key, "Authorization": f"Bearer {user.token}",
+            "Prefer": "return=representation", "Content-Type": "application/json",
+        }, timeout=15, **kwargs)
+        if response.status_code in (401, 403):
+            raise HTTPException(403, "No tenés acceso a estas posiciones.")
+        response.raise_for_status()
+        return response.json()
+    except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+        raise HTTPException(503, "No se pudo acceder a la base de datos de Supabase.") from exc
 
 
-def save_position(
-    ticker: str,
-    asset_type: str,
-    quantity: float,
-    buy_price: float,
-    buy_date: date,
-    user_id: str = "default_user",
-) -> Dict:
-    """Guarda una nueva posición en la base de datos."""
-    init_db()
-    pos_id = str(uuid.uuid4())
-    date_str = buy_date.isoformat() if hasattr(buy_date, "isoformat") else str(buy_date)
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO positions (id, user_id, ticker, asset_type, quantity, buy_price, buy_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (pos_id, user_id, ticker.upper(), asset_type, quantity, buy_price, date_str))
-        conn.commit()
-
-    return {
-        "id": pos_id,
-        "user_id": user_id,
-        "ticker": ticker.upper(),
-        "asset_type": asset_type,
-        "quantity": quantity,
-        "buy_price": buy_price,
-        "buy_date": buy_date,
-    }
+def list_positions(user: User) -> list[dict]:
+    rows: list[dict] = []
+    while True:
+        page = _request(user, "GET", params={
+            "user_id": f"eq.{user.id}", "select": "*", "order": "created_at.asc,id.asc",
+            "limit": "500", "offset": str(len(rows)),
+        })
+        rows.extend(page)
+        if len(page) < 500:
+            return rows
 
 
-def list_positions(user_id: str = "default_user") -> List[Dict]:
-    """Recupera todas las posiciones activas de un usuario."""
-    init_db()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM positions WHERE user_id = ?", (user_id,))
-        rows = cursor.fetchall()
-
-    return [
-        {
-            "id": row["id"],
-            "ticker": row["ticker"],
-            "asset_type": row["asset_type"],
-            "quantity": float(row["quantity"]),
-            "buy_price": float(row["buy_price"]),
-            "buy_date": row["buy_date"],
-        }
-        for row in rows
-    ]
+def save_position(user: User, values: dict) -> dict:
+    return _request(user, "POST", json={**values, "user_id": user.id})[0]
 
 
-def delete_position(position_id: str) -> bool:
-    """Elimina una posición por su ID."""
-    init_db()
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM positions WHERE id = ?", (position_id,))
-        conn.commit()
-        return cursor.rowcount > 0
-
+def delete_position(user: User, position_id: str) -> bool:
+    return bool(_request(user, "DELETE", params={"id": f"eq.{position_id}", "user_id": f"eq.{user.id}"}))

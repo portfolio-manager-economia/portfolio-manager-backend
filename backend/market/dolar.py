@@ -1,37 +1,39 @@
-"""Cliente para dolarapi.com para consultar cotizaciones del dólar en Argentina (Oficial, MEP, CCL, Blue)."""
-
-from typing import Any, Dict, Optional
+"""DolarAPI quotes: never fabricate a fallback exchange rate."""
+from copy import deepcopy
+from threading import RLock
+from time import monotonic
+import math
 import httpx
 
-
 DOLAR_API_BASE_URL = "https://dolarapi.com/v1/dolares"
+_CACHE: tuple[float, dict] | None = None
+_LOCK = RLock()
 
 
-def get_dolar_rates() -> Dict[str, Dict[str, Any]]:
-    """Consulta las cotizaciones vigentes de todos los tipos de dólar.
-
-    Retorna un diccionario {casa: {compra, venta, fechaActualizacion, ...}}.
-    """
+def get_dolar_rates(refresh: bool = False) -> dict:
+    global _CACHE
+    with _LOCK:
+        cached = _CACHE
+    if not refresh and cached and monotonic() - cached[0] < 60:
+        return deepcopy(cached[1])
     try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.get(DOLAR_API_BASE_URL)
-            resp.raise_for_status()
-            data = resp.json()
-            return {item["casa"]: item for item in data}
-    except Exception as e:
-        # Fallback de respaldo o error descriptivo
-        return {
-            "error": str(e),
-            "oficial": {"compra": 980.0, "venta": 1020.0},
-            "bolsa": {"compra": 1180.0, "venta": 1200.0},
-            "contadoconliqui": {"compra": 1220.0, "venta": 1240.0},
-        }
+        response = httpx.get(DOLAR_API_BASE_URL, timeout=10)
+        response.raise_for_status()
+        rates = {item["casa"]: item for item in response.json()}
+        if not rates:
+            raise ValueError("Respuesta vacía")
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError("No se pudieron obtener las cotizaciones de DolarAPI.") from exc
+    with _LOCK:
+        _CACHE = (monotonic(), deepcopy(rates))
+    return rates
 
 
-def get_mep_rate() -> float:
-    """Obtiene la cotización de venta del Dólar MEP (Bolsa)."""
-    rates = get_dolar_rates()
-    if "bolsa" in rates and "venta" in rates["bolsa"]:
-        return float(rates["bolsa"]["venta"])
-    return 1200.0
-
+def get_mep_rate(refresh: bool = False) -> float:
+    try:
+        value = float(get_dolar_rates(refresh)["bolsa"]["venta"])
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("Cotización no positiva")
+        return value
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("No hay una cotización MEP válida para convertir ARS a USD.") from exc

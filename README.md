@@ -1,277 +1,93 @@
-# Portfolio Manager
+# Portfolio Manager · Backend
 
-Aplicacion web para el seguimiento y la optimizacion de un portfolio de inversion (acciones, CEDEARs, bonos y crypto), con datos reales de mercado y analisis cuantitativo basado en el modelo de Markowitz.
+Trabajo práctico de Economía y Finanzas: seguimiento de inversiones y optimización de Markowitz con FastAPI, NumPy, pandas y SciPy. El frontend está en el repositorio hermano `portfolio-manager-frontend`.
 
-Trabajo practico de Economia y Finanzas. Eje tematico: Finanzas Cuantitativas y Personales (Optimizador de Portafolios), desarrollado con asistencia de agentes de IA (Antigravity).
+## Funcionalidades implementadas
 
----
+- Sesiones de Supabase Auth: el backend valida el JWT contra Auth antes de acceder a posiciones o ejecutar optimizaciones.
+- Persistencia en PostgreSQL de Supabase, por usuario. Las llamadas a PostgREST usan el JWT del usuario para conservar las políticas RLS. No hay usuario compartido ni fallback a SQLite.
+- Alta, listado y eliminación de posiciones. Se guardan cantidad, precio, fecha, moneda y MEP de compra. No hay edición de posiciones.
+- Valuación y ganancia/pérdida en USD. Precios de compra y cotización permanecen en la moneda nativa; nunca se suman pesos con dólares.
+- Cotizaciones intradía de Yahoo cuando están disponibles, con último cierre como alternativa fechada. Caché con vencimiento de 60 segundos para cotizaciones, una hora para históricos, y bypass al solicitar actualización manual.
+- Dólar actual desde DolarAPI y MEP histórico de venta desde ArgentinaDatos. No se generan tipos de cambio ni precios ficticios cuando falla un proveedor.
+- Frontera eficiente (hasta 30 puntos), mínima varianza y máximo Sharpe, con pesos no negativos que suman uno.
+- Comparación contra la cartera actual: pesos por valor de mercado en USD, agregando compras del mismo ticker. Las métricas usan la misma moneda, ventana y calendario que las alternativas óptimas.
+- Anualización de 365 para carteras exclusivamente cripto y 252 para tradicionales o mixtas, alineadas a sesiones comunes.
 
-## 1. Problema economico
+## Crear y conectar el proyecto Supabase
 
-Un inversor reparte su capital entre varios activos. Cada activo tiene un retorno esperado y un riesgo, y los activos se mueven de forma correlacionada. El problema es decidir en que proporcion mantener cada uno para obtener el mejor retorno posible para un nivel de riesgo dado.
+1. Crear un proyecto **nuevo** en Supabase. Elegir organización, región y plan en la cuenta; la contraseña de PostgreSQL no se usa en el código de esta aplicación.
+2. Ejecutar `supabase/migrations/202610280001_positions.sql` en el SQL Editor del proyecto nuevo. Crea la tabla, índice y políticas RLS. También puede aplicarse con Supabase CLI enlazada al proyecto (`supabase db push`). La migración debe ejecutarse una vez.
+3. Ejecutar `supabase/tests/positions_rls.sql` en ese proyecto de desarrollo. Verifica lectura propia, invisibilidad de otro usuario, bloqueo de inserción y eliminación ajena y denegación al rol anónimo. Termina en `rollback`, sin conservar usuarios ni posiciones de prueba.
+4. En Authentication, habilitar email/password, mantener confirmación por correo y configurar Site URL y Redirect URLs para `http://localhost:5173` (y el dominio real cuando se despliegue).
+5. Copiar `.env.example` a `.env`. Completar `SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY` con la URL y clave **publicable** del mismo proyecto. Se admite también la clave `anon` heredada; no usar `service_role` ni claves secretas en el frontend.
+6. Configurar el frontend con la misma URL y clave publicable. Registrarse, confirmar el correo e iniciar sesión.
 
-La aplicacion permite:
+El esquema y el cliente están implementados en este repositorio. Aplicar la migración, probar RLS y confirmar login/persistencia contra un proyecto real requieren acceso a la cuenta Supabase; las pruebas Python no sustituyen esa validación.
 
-1. Registrar las posiciones propias y hacer seguimiento de su valor.
-2. Medir el riesgo y el retorno del portfolio actual con precios reales.
-3. Calcular la frontera eficiente y los portfolios optimos.
-4. Comparar el portfolio actual contra el optimo.
+## Instalación en Windows / PowerShell
 
-## 2. Modelo economico
+Python 3.11+:
 
-### Retornos logaritmicos
+```powershell
+py -m venv .venv
+.venv/Scripts/python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
+# Completar la configuración antes de iniciar sesión.
+.venv/Scripts/python.exe -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+```
 
-$$
-r_t = \ln\left(\frac{P_t}{P_{t-1}}\right)
-$$
+Variables:
 
-### Retorno esperado y covarianzas
+| Variable | Uso |
+| --- | --- |
+| `SUPABASE_URL` | URL del proyecto |
+| `SUPABASE_PUBLISHABLE_KEY` | Clave publicable o `anon` |
+| `CORS_ORIGINS` | Orígenes separados por coma; por defecto `http://localhost:5173` |
 
-Para cada activo $i$ se estima el retorno medio y, entre pares de activos, la covarianza:
+No subir `.env` a Git. La documentación interactiva de la API está en `http://localhost:8000/docs`.
 
-$$
-\mu_i = \frac{1}{T}\sum_{t=1}^{T} r_{i,t}
-\qquad
-\Sigma_{ij} = \operatorname{Cov}(r_i, r_j)
-$$
+## Contrato de API
 
-### Retorno y riesgo del portfolio
+`GET /api/health` y `GET /api/market/dolar` son públicos. Los demás endpoints requieren `Authorization: Bearer <access_token>` de Supabase.
 
-Con vector de pesos $w$, vector de retornos esperados $\mu$ y matriz de covarianzas $\Sigma$:
+| Método | Ruta | Resultado |
+| --- | --- | --- |
+| GET | `/api/positions?refresh=false` | Posiciones del usuario, precios fechados y valores USD |
+| POST | `/api/positions` | Crear posición; infiere MEP histórico de compra si falta |
+| DELETE | `/api/positions/{uuid}` | Eliminar posición propia; 404 si no es accesible |
+| POST | `/api/optimize` | Frontera, óptimos y comparación opcional |
 
-$$
-\mu_p = w^\top \mu
-\qquad
-\sigma_p^2 = w^\top \Sigma\, w
-\qquad
-\sigma_p = \sqrt{w^\top \Sigma\, w}
-$$
+Ejemplo de posición:
 
-### Ratio de Sharpe
+```json
+{"ticker":"GGAL.BA","asset_type":"stock","currency":"ARS","quantity":10,"buy_price":1000,"buy_date":"2024-01-15","buy_fx_rate":1100}
+```
 
-$$
-S = \frac{\mu_p - r_f}{\sigma_p}
-$$
+`buy_fx_rate` es ARS por USD y puede omitirse para buscar la última observación histórica no posterior a la compra, como máximo diez días antes. Para compras en USD se guarda 1. Bonos soberanos: `quantity` representa valor nominal y `buy_price` precio por 100 VN.
 
-donde $r_f$ es la tasa libre de riesgo.
+Ejemplo de optimización:
 
-### Problema de optimizacion
+```json
+{"tickers":["AAPL","GGAL.BA"],"period":"1y","risk_free_rate":0.04,"allow_short":false,"compare_current":true}
+```
 
-**Minima varianza:**
+La comparación exige incluir todos los tickers de la cartera para evitar omitir posiciones; pueden agregarse activos nuevos con peso actual cero. Los pesos se calculan en el servidor, nunca se aceptan importes o IDs de otro usuario desde el navegador. La tasa es anual en USD; `0.04` es solo un ejemplo editable, no una tasa de mercado vigente.
 
-$$
-\min_{w} \; w^\top \Sigma\, w
-$$
+## Metodología y límites
 
-**Maximo Sharpe:**
+Ver `docs/modelo-economico.md` para las ecuaciones. Se calculan retornos logarítmicos, covarianza muestral N−1 y optimización media-varianza long-only. Los precios históricos en ARS se convierten con el MEP de su fecha, sin usar dólar actual, rellenar con FX futuro ni inventar datos faltantes. Se informan fechas efectivas y observaciones; los huecos reducen la muestra.
 
-$$
-\max_{w} \; \frac{w^\top \mu - r_f}{\sqrt{w^\top \Sigma\, w}}
-$$
+Las cotizaciones pueden estar demoradas o faltar para determinados tickers, especialmente bonos. El catálogo del frontend no garantiza cobertura de Yahoo. Si no hay precio o MEP actual, la posición se informa sin valuación, se ocultan totales incompletos y se bloquea la comparación. La fecha de la cotización permite distinguir una consulta reciente de un precio antiguo. Las cachés son en memoria del proceso, no una base histórica permanente.
 
-**Frontera eficiente** (para cada retorno objetivo $\mu^*$):
+Las carteras mixtas usan 252 sesiones comunes: el retorno cripto del fin de semana queda incluido entre viernes y lunes. Se trata de una aproximación de calendario; los resultados son estimaciones históricas, no un backtest de movimientos ni una promesa de rentabilidad. No se modelan impuestos, costos, dividendos cobrados, cupones cobrados ni riesgo de ejecución.
 
-$$
-\min_{w} \; w^\top \Sigma\, w
-\quad \text{s.a.} \quad
-w^\top \mu = \mu^*
-$$
+## Pruebas
 
-**Restricciones comunes** (sin ventas en corto):
+```powershell
+.venv/Scripts/python.exe -m pytest -q
+```
 
-$$
-\sum_{i=1}^{n} w_i = 1
-\qquad
-w_i \ge 0 \quad \forall i
-$$
+La suite no usa internet ni datos de producción. Cubre soluciones financieras deterministas, conversión histórica, calendario cripto/mixto, pesos por valor de mercado, lotes duplicados, validación de sesión, propagación del JWT, filtros por usuario, caché y fallos de proveedores. Las pruebas RLS reales se ejecutan por separado con el SQL indicado arriba.
 
-### Anualizacion
-
-Con $k$ periodos de operacion por ano ($k = 252$ para activos tradicionales y $k = 365$ para crypto):
-
-$$
-\mu_{anual} = k \cdot \mu_{diario}
-\qquad
-\sigma_{anual} = \sqrt{k} \cdot \sigma_{diario}
-$$
-
-Si el portfolio mezcla ambos tipos de activo, las series se alinean por fechas en comun.
-
-### Supuestos y limitaciones
-
-- El modelo asume retornos normales. En crypto las colas son mas pesadas y el riesgo puede subestimarse.
-- Los retornos historicos no garantizan retornos futuros.
-- Las correlaciones no son estables y tienden a subir en periodos de crisis.
-- No se consideran costos de transaccion ni impuestos.
-- Los retornos esperados estimados con datos historicos son sensibles a la ventana elegida.
-
-## 3. Arquitectura
-
-    Frontend (React + Vite)
-            |  HTTP / JSON
-            v
-    Backend (FastAPI, Python)
-        |-- Calculo financiero (numpy, pandas, scipy)
-        |-- Clientes de datos de mercado
-        |-- Acceso a base de datos
-            |
-            v
-    Supabase (PostgreSQL + Auth)
-
-    Fuentes de datos externas:
-      - yfinance: acciones, CEDEARs (sufijo .BA), bonos
-      - CoinGecko o Binance: crypto
-      - dolarapi.com: tipo de cambio (oficial, MEP, CCL)
-
-Decisiones de diseno:
-
-- El calculo financiero esta aislado de la API y de la base de datos. Son funciones puras, testeables sin servidor ni internet.
-- Los precios historicos se guardan en la base (cache). Se evita depender de las APIs en cada consulta y se respetan sus limites de uso.
-- Cada usuario tiene su propio portfolio, mediante Supabase Auth y reglas de acceso por fila (RLS).
-
-## 4. Funcionalidades
-
-| Modulo | Descripcion |
-|---|---|
-| Autenticacion | Registro e inicio de sesion. Cada usuario ve solo su portfolio. |
-| Gestion de activos | Alta, baja y modificacion de posiciones: ticker, tipo, cantidad, precio y fecha de compra. |
-| Datos de mercado | Descarga y actualizacion de precios historicos y cotizaciones actuales. |
-| Seguimiento | Valor actual, ganancia o perdida por activo y total, distribucion por tipo de activo. |
-| Metricas | Retorno, volatilidad, matriz de correlaciones, ratio de Sharpe. |
-| Optimizacion | Frontera eficiente, portfolio de minima varianza y de maximo Sharpe. |
-| Comparacion | Pesos y metricas del portfolio actual frente al optimo. |
-
-## 5. Estructura del proyecto
-
-    portfolio-manager/
-    |-- backend/
-    |   |-- main.py              # App FastAPI y rutas
-    |   |-- finance/             # Retornos, metricas, optimizador (funciones puras)
-    |   |-- market/              # Clientes de yfinance, CoinGecko, dolarapi
-    |   |-- db/                  # Acceso a Supabase
-    |   |-- schemas.py           # Validacion de datos (Pydantic)
-    |-- frontend/
-    |   |-- src/
-    |   |   |-- components/
-    |   |   |-- pages/
-    |   |   |-- api/             # Llamadas al backend
-    |-- tests/
-    |   |-- unit/                # Calculos con valores de referencia
-    |   |-- integration/         # API + base de datos
-    |   |-- fixtures/            # Series de precios fijas
-    |-- docs/
-    |   |-- uso-de-ia.md         # Bitacora de prompts, comandos y correcciones
-    |   |-- modelo-economico.md  # Formulas y supuestos
-    |-- AGENTS.md                # Reglas para el agente de IA
-    |-- requirements.txt
-    |-- README.md
-
-## 6. Stack
-
-- Backend: Python 3.11+, FastAPI, Uvicorn, Pydantic
-- Calculo: numpy, pandas, scipy
-- Frontend: React, Vite, Recharts
-- Base de datos y autenticacion: Supabase (PostgreSQL)
-- Datos de mercado: yfinance, CoinGecko, dolarapi.com
-- Tests: pytest, pytest-cov, httpx
-
-## 7. Instalacion y uso
-
-    git clone <url-del-repo>
-    cd portfolio-manager
-
-    # Backend
-    python -m venv venv
-    source venv/bin/activate          # Windows: venv\Scripts\activate
-    pip install -r requirements.txt
-    cp .env.example .env              # completar credenciales de Supabase
-    uvicorn backend.main:app --reload
-
-    # Frontend
-    cd frontend
-    npm install
-    npm run dev
-
-Variables de entorno (`.env`):
-
-    SUPABASE_URL=
-    SUPABASE_KEY=
-
-## 8. Pruebas automatizadas
-
-    pytest -v
-    pytest --cov=backend
-
-La guia exige que los calculos esten verificados matematicamente.
-
-Pruebas unitarias (sin internet ni base de datos):
-
-- Portfolio de 2 activos con covarianzas conocidas: la varianza coincide con el calculo manual de la formula.
-- Los pesos optimizados suman 1 y son no negativos.
-- Con un solo activo, el portfolio optimo es 100% ese activo.
-- Retorno logaritmico de una serie con valores simples (por ejemplo 100 -> 110) igual a ln(1.1).
-- Anualizacion con el factor correcto segun el tipo de activo.
-- Casos de borde: serie vacia, un solo precio, activos con desvio cero.
-
-Pruebas de integracion:
-
-- Carga de precios (fixture) -> calculo de metricas -> persistencia en la base.
-- Endpoints de la API con datos de prueba.
-- Los clientes de APIs externas se prueban con respuestas simuladas (mocks), no con llamadas reales.
-
-## 9. Uso de IA
-
-El proyecto se desarrolla con Antigravity. Toda la interaccion con agentes se documenta en `docs/uso-de-ia.md`.
-
-Flujo de trabajo previsto:
-
-| Etapa | Herramienta | Uso |
-|---|---|---|
-| Definicion de requerimientos | `/grill-me` | El agente entrevista al equipo antes de escribir codigo. |
-| Implementacion por modulo | `/goal` | Objetivo acotado con criterio de cumplimiento (por ejemplo, "todos los tests de `finance/` pasan"). |
-| Aprendizaje de errores | `/learn` | Se registran correcciones para que el agente no repita fallos. |
-| Contexto de la base | MCP de Supabase | El agente consulta el esquema real de la base al escribir codigo. |
-| Reglas del agente | `AGENTS.md` | Directivas del proyecto (ver abajo). |
-
-Configuracion deliberada del agente:
-
-- Temperatura baja (0.0 a 0.2) para codigo y calculos, con Top-P bajo para respuestas deterministas.
-- Temperatura mas alta solo para lluvia de ideas o textos explicativos.
-- System prompt orientado a rigor financiero: validar consistencia matematica, tipar el codigo y no inventar datos de mercado.
-- Manejo de la ventana de contexto: se entregan al agente solo los archivos relevantes para cada tarea.
-
-Uso critico de la IA. Para cada modulo se registra:
-
-1. El prompt o comando utilizado.
-2. Que genero el agente.
-3. Como se verifico (tests, calculo manual).
-4. Errores o alucinaciones numericas detectados y como se corrigieron.
-
-## 10. Criterios de evaluacion
-
-| Criterio de la guia | Como se cubre |
-|---|---|
-| Rigor del modelo economico | Formulas de Markowitz documentadas, supuestos y limitaciones explicitos, verificacion manual. |
-| Uso critico de la IA | Bitacora en `docs/uso-de-ia.md`, configuracion de agentes justificada, errores registrados. |
-| Cobertura de pruebas | Tests unitarios con valores de referencia y tests de integracion, sin dependencia de internet. |
-| Contexto y datos | Codigo modular, calculo separado de la API y la base, datos reales cacheados, documentacion. |
-
-## 11. Hoja de ruta
-
-1. Definir requerimientos con `/grill-me` y escribir `AGENTS.md`.
-2. Modulo `finance/` con sus tests (retornos, metricas, optimizador).
-3. Clientes de datos de mercado y cache de precios.
-4. Esquema de base de datos en Supabase y autenticacion.
-5. API REST con tests de integracion.
-6. Frontend en React: gestion de activos y seguimiento.
-7. Frontend: metricas, frontera eficiente y comparacion.
-8. Documentacion final y preparacion de la defensa.
-
-## 12. Integrantes
-
-- Nombre y apellido
-- Nombre y apellido
-
-## 13. Licencia
-
-Proyecto academico. Uso educativo.
+Fuentes: [Supabase Auth](https://supabase.com/docs/guides/auth), [RLS](https://supabase.com/docs/guides/database/postgres/row-level-security), [DolarAPI](https://dolarapi.com/docs/argentina/), [ArgentinaDatos](https://argentinadatos.com/docs/operations/get-cotizaciones-dolares).

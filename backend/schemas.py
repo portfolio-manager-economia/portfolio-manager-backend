@@ -1,9 +1,8 @@
-"""Esquemas de datos y validación de entrada/salida (Pydantic)."""
-
-from datetime import date, datetime
+"""Validated public API contracts. All portfolio totals and returns use USD."""
+from datetime import date
 from enum import Enum
-from typing import Dict, List, Optional
-from pydantic import BaseModel, Field
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AssetType(str, Enum):
@@ -13,50 +12,76 @@ class AssetType(str, Enum):
     BOND = "bond"
 
 
-class PositionBase(BaseModel):
-    ticker: str = Field(..., description="Ticker o símbolo del activo (ej: AAPL, GGAL.BA, BTC-USD)")
-    asset_type: AssetType = Field(AssetType.STOCK, description="Tipo de activo financiero")
-    quantity: float = Field(..., gt=0, description="Cantidad nominal de títulos")
-    buy_price: float = Field(..., gt=0, description="Precio unitario de compra")
-    buy_date: date = Field(..., description="Fecha de adquisición")
+class PositionCreate(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+    ticker: str = Field(pattern=r"^[A-Z0-9.^=\-]{1,30}$")
+    asset_type: AssetType = AssetType.STOCK
+    currency: Literal["ARS", "USD"]
+    quantity: float = Field(gt=0)
+    buy_price: float = Field(gt=0)
+    buy_date: date
+    buy_fx_rate: float | None = Field(None, gt=0, description="ARS por USD en la compra; opcional, se estima con MEP histórico")
+
+    @field_validator("ticker", mode="before")
+    @classmethod
+    def normalize_ticker(cls, value: str) -> str:
+        return value.strip().upper()
+
+    @field_validator("buy_date")
+    @classmethod
+    def past_date(cls, value: date) -> date:
+        if value > date.today():
+            raise ValueError("La fecha de compra no puede ser futura.")
+        return value
 
 
-class PositionCreate(PositionBase):
-    pass
-
-
-class PositionResponse(PositionBase):
-    id: Optional[str] = None
-    current_price: Optional[float] = None
-    market_value: Optional[float] = None
-    unrealized_pnl: Optional[float] = None
-    unrealized_pnl_pct: Optional[float] = None
-
-
-class PortfolioPerformanceResponse(BaseModel):
-    expected_return: float = Field(..., description="Retorno anualizado esperado")
-    volatility: float = Field(..., description="Volatilidad anualizada (desvío estándar)")
-    sharpe_ratio: float = Field(..., description="Ratio de Sharpe")
-    weights: Dict[str, float] = Field(..., description="Ponderación por activo en el portafolio")
+class PositionResponse(PositionCreate):
+    id: str
+    current_price: float | None = None
+    market_value: float | None = None
+    cost_basis_usd: float
+    unrealized_pnl: float | None = None
+    unrealized_pnl_pct: float | None = None
+    quote_at: str | None = None
+    quote_error: str | None = None
 
 
 class OptimizationRequest(BaseModel):
-    tickers: List[str] = Field(..., min_length=1, description="Lista de activos a incluir en el análisis")
-    risk_free_rate: float = Field(0.0, ge=0.0, description="Tasa libre de riesgo anualizada (ej: 0.04 para 4%)")
-    allow_short: bool = Field(False, description="Permitir ventas en corto (long-only por defecto)")
-    period: str = Field("1y", description="Período de datos históricos (ej: '6mo', '1y', '2y', '5y')")
+    model_config = ConfigDict(allow_inf_nan=False)
+    tickers: list[str] = Field(min_length=2, max_length=40)
+    risk_free_rate: float = Field(0.04, ge=0, le=1)
+    allow_short: Literal[False] = False
+    period: Literal["6mo", "1y", "2y", "5y"] = "1y"
+    compare_current: bool = False
+
+    @field_validator("tickers")
+    @classmethod
+    def normalize_tickers(cls, values: list[str]) -> list[str]:
+        import re
+        tickers = [v.strip().upper() for v in values]
+        if len(set(tickers)) != len(tickers):
+            raise ValueError("Los activos deben ser distintos.")
+        if any(not re.fullmatch(r"[A-Z0-9.^=\-]{1,30}", t) for t in tickers):
+            raise ValueError("Ticker inválido.")
+        return tickers
 
 
 class FrontierPoint(BaseModel):
     expected_return: float
     volatility: float
     sharpe_ratio: float
-    weights: Dict[str, float]
+    weights: dict[str, float]
 
 
 class OptimizationResponse(BaseModel):
-    gmvp: FrontierPoint = Field(..., description="Portafolio de Mínima Varianza Global")
-    tangency: FrontierPoint = Field(..., description="Portafolio de Máximo Ratio de Sharpe")
-    frontier: List[FrontierPoint] = Field(default_factory=list, description="Puntos de la Frontera Eficiente")
-    current_portfolio: Optional[FrontierPoint] = Field(None, description="Métricas de la cartera actual para comparación")
-
+    gmvp: FrontierPoint
+    tangency: FrontierPoint
+    frontier: list[FrontierPoint]
+    current_portfolio: FrontierPoint | None = None
+    currency: Literal["USD"] = "USD"
+    annualization_factor: int
+    observations: int
+    start_date: str
+    end_date: str
+    valuation_at: str | None = None
+    fx_method: str
