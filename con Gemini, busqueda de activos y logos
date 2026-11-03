@@ -1,0 +1,13 @@
+ .env.example                     |   5 [32m++[m
+ README.md                        |   7 [32m+++[m
+ backend/db/storage.py            |   9 [32m++[m[31m-[m
+ backend/importer.py              | 132 [32m+++++++++++++++++++++++++++++++++++++++[m
+ backend/main.py                  |  57 [32m++++++++++++++++[m[31m-[m
+ backend/market/assets.py         |  71 [32m+++++++++++++++++++++[m
+ backend/schemas.py               |  41 [32m++++++++++++[m
+ docs/probar-importacion.md       |  98 [32m+++++++++++++++++++++++++++++[m
+ docs/uso-de-ia.md                |  28 [32m+++++++++[m
+ requirements.txt                 |   1 [32m+[m
+ tests/integration/test_import.py | 131 [32m++++++++++++++++++++++++++++++++++++++[m
+ tests/unit/test_assets.py        |  81 [32m++++++++++++++++++++++++[m
+ 12 files changed, 657 insertions(+), 4 deletions(-)

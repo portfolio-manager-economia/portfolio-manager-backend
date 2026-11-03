@@ -1,15 +1,20 @@
 """Authenticated portfolio API, USD valuation and comparable Markowitz results."""
 from datetime import datetime, timezone
-from uuid import UUID
+from uuid import UUID, uuid5, NAMESPACE_URL
 import os
 import numpy as np
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
 from .auth import User, require_user
+from .importer import analyze_screenshot
+from .schemas import ScreenshotRequest, ScreenshotDraft, ImportPositionsRequest
+from .db.storage import save_import
 from .schemas import PositionCreate, PositionResponse, OptimizationRequest, OptimizationResponse, FrontierPoint
 from .db.storage import list_positions, save_position, delete_position
 from .market.prices import fetch_multiple_tickers, get_currency, get_current_quote, get_mep_history, get_mep_on_date
 from .market.dolar import get_dolar_rates, get_mep_rate
+from .market.assets import search_assets, asset_logo_url
+from .schemas import AssetSearchResult
 from .finance.returns import calculate_log_returns
 from .finance.metrics import (calculate_expected_returns, calculate_covariance_matrix,
                               calculate_portfolio_performance, calculate_sharpe_ratio)
@@ -35,6 +40,29 @@ def get_dolar_quotations(refresh: bool = False):
         raise HTTPException(503, str(exc)) from exc
 
 
+@app.get("/api/market/assets/search", response_model=list[AssetSearchResult])
+def find_assets(q: str = Query(min_length=2, max_length=80), user: User = Depends(require_user)):
+    if len(q.strip()) < 2:
+        raise HTTPException(422, "Ingresá al menos dos caracteres.")
+    try:
+        return search_assets(q)
+    except ValueError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.get("/api/market/assets/{ticker}")
+def asset_details(ticker: str = Path(pattern=r"^[A-Z0-9.^=\-]{1,30}$"), user: User = Depends(require_user)):
+    try:
+        currency = get_currency(ticker)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    try:
+        quote = get_current_quote(ticker)
+    except ValueError:
+        quote = {"price": None, "quote_at": None}
+    return {"ticker": ticker, "currency": currency, "logo_url": asset_logo_url(ticker), **quote}
+
+
 def enrich_positions(positions: list[dict], refresh: bool = False) -> list[dict]:
     fx, fx_error = 1.0, None
     if any(p["currency"] == "ARS" for p in positions):
@@ -55,7 +83,7 @@ def enrich_positions(positions: list[dict], refresh: bool = False) -> list[dict]
         quote = quotes[p["ticker"]]
         error = quote.get("error") or (fx_error if p["currency"] == "ARS" else None)
         value = None if error else position_value(quantity, quote["price"], p["currency"], fx, p["asset_type"])
-        result.append({**p, "cost_basis_usd": cost,
+        result.append({**p, "logo_url": asset_logo_url(p["ticker"]), "cost_basis_usd": cost,
             "current_price": quote.get("price"), "market_value": value,
             "unrealized_pnl": None if value is None else value - cost,
             "unrealized_pnl_pct": None if value is None else (value - cost) / cost,
@@ -89,6 +117,29 @@ def remove_position(position_id: UUID, user: User = Depends(require_user)):
     if not delete_position(user, str(position_id)):
         raise HTTPException(404, "Posición no encontrada.")
     return {"message": "Posición eliminada correctamente"}
+
+
+@app.post("/api/import/screenshot", response_model=ScreenshotDraft)
+def extract_screenshot(request: ScreenshotRequest, user: User = Depends(require_user)):
+    return analyze_screenshot(request, user.id)
+
+
+@app.post("/api/import/positions")
+def import_positions(request: ImportPositionsRequest, user: User = Depends(require_user)):
+    rows = []
+    # Validate every row before the single database transaction. Nothing is saved on error.
+    for index, pos in enumerate(request.positions):
+        try:
+            currency = get_currency(pos.ticker)
+            if currency != pos.currency:
+                raise ValueError(f"{pos.ticker} cotiza en {currency}; corregí la moneda.")
+            fx = 1.0 if currency == "USD" else (pos.buy_fx_rate or get_mep_on_date(pos.buy_date))
+        except ValueError as exc:
+            raise HTTPException(422, f"Fila {index + 1}: {exc}") from exc
+        rows.append({**pos.model_dump(mode="json"), "buy_fx_rate": fx, "user_id": user.id,
+            "id": str(uuid5(NAMESPACE_URL, f"portfolio:{user.id}:{request.import_id}:{index}"))})
+    save_import(user, rows)
+    return {"message": "Cartera importada correctamente"}
 
 
 @app.post("/api/optimize", response_model=OptimizationResponse)

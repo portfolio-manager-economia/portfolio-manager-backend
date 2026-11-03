@@ -4,6 +4,11 @@ Trabajo práctico de Economía y Finanzas: seguimiento de inversiones y optimiza
 
 ## Funcionalidades implementadas
 
+- Buscador autenticado de activos por nombre o ticker en Yahoo Finance, con caché de una hora y filtro a mercados compatibles con ARS/USD. Verificación de moneda y última cotización al elegir un resultado. ETFs se tratan dentro de la categoría `stock` del modelo existente; el mercado argentino desconocido requiere confirmar si es acción o CEDEAR.
+- Logos de activos en las respuestas de posiciones, sin consultas adicionales de precios por cada imagen. Las imágenes de Financial Modeling Prep son opcionales: el frontend muestra iniciales si no están disponibles. No requiere una clave adicional.
+
+- Importación por captura con Gemini: borrador editable, campos faltantes sin inventar, revisión obligatoria y guardado por lote. [Configuración local y prueba completa](docs/probar-importacion.md).
+
 - Sesiones de Supabase Auth: el backend valida el JWT contra Auth antes de acceder a posiciones o ejecutar optimizaciones.
 - Persistencia en PostgreSQL de Supabase, por usuario. Las llamadas a PostgREST usan el JWT del usuario para conservar las políticas RLS. No hay usuario compartido ni fallback a SQLite.
 - Alta, listado y eliminación de posiciones. Se guardan cantidad, precio, fecha, moneda y MEP de compra. No hay edición de posiciones.
@@ -54,6 +59,8 @@ No subir `.env` a Git. La documentación interactiva de la API está en `http://
 | Método | Ruta | Resultado |
 | --- | --- | --- |
 | GET | `/api/positions?refresh=false` | Posiciones del usuario, precios fechados y valores USD |
+| GET | `/api/market/assets/search?q=Apple` | Sugerencias compatibles por nombre o símbolo; requiere sesión |
+| GET | `/api/market/assets/{ticker}` | Moneda verificada, última cotización fechada y URL opcional del logo; requiere sesión |
 | POST | `/api/positions` | Crear posición; infiere MEP histórico de compra si falta |
 | DELETE | `/api/positions/{uuid}` | Eliminar posición propia; 404 si no es accesible |
 | POST | `/api/optimize` | Frontera, óptimos y comparación opcional |

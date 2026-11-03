@@ -7,11 +7,12 @@ from ..config import supabase_config
 
 
 def _request(user: User, method: str, **kwargs: Any) -> list[dict]:
+    prefer = kwargs.pop("prefer", "return=representation")
     try:
         url, key = supabase_config()
         response = httpx.request(method, f"{url}/rest/v1/positions", headers={
             "apikey": key, "Authorization": f"Bearer {user.token}",
-            "Prefer": "return=representation", "Content-Type": "application/json",
+            "Prefer": prefer, "Content-Type": "application/json",
         }, timeout=15, **kwargs)
         if response.status_code in (401, 403):
             raise HTTPException(403, "No tenés acceso a estas posiciones.")
@@ -35,6 +36,12 @@ def list_positions(user: User) -> list[dict]:
 
 def save_position(user: User, values: dict) -> dict:
     return _request(user, "POST", json={**values, "user_id": user.id})[0]
+
+
+def save_import(user: User, rows: list[dict]) -> None:
+    """Single atomic insert; deterministic IDs make retries safe without UPDATE permission."""
+    _request(user, "POST", params={"on_conflict": "id"},
+        prefer="return=representation,resolution=ignore-duplicates", json=rows)
 
 
 def delete_position(user: User, position_id: str) -> bool:
